@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lop-Client Admin Panel</title>
+    <style>
+        :root {
+            --bg: #090D16;
+            --surface: #131B2E;
+            --border: #1E293B;
+            --primary: #10B981;
+            --danger: #EF4444;
+            --text: #F8FAFC;
+            --muted: #94A3B8;
+        }
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 24px;
+        }
+        .container { max-width: 900px; margin: 0 auto; }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        h1, h2 { margin-top: 0; }
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        .badge-active { background: #064E3B; color: #34D399; }
+        .badge-inactive { background: #7F1D1D; color: #F87171; }
+        .badge-claimed { background: #1E3A8A; color: #93C5FD; }
+        .badge-unclaimed { background: #374151; color: #D1D5DB; }
+        input, select, button {
+            background: #1E293B;
+            border: 1px solid #334155;
+            color: var(--text);
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        button {
+            cursor: pointer;
+            background: var(--primary);
+            color: #000;
+            font-weight: bold;
+            border: none;
+        }
+        button:hover { opacity: 0.9; }
+        button.danger { background: var(--danger); color: #fff; }
+        button.secondary { background: #334155; color: #fff; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+        }
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+        }
+        th { color: var(--muted); }
+        .mono { font-family: monospace; font-size: 14px; font-weight: bold; }
+        .hidden { display: none; }
+        .flex { display: flex; gap: 12px; align-items: center; }
+        .flex-between { display: flex; justify-content: space-between; align-items: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Login Box -->
+        <div id="loginSection" class="card" style="max-width: 400px; margin: 80px auto;">
+            <h2>Lop-Client Admin Login</h2>
+            <p style="color: var(--muted); font-size: 13px;">Hanya dapat diakses melalui Localhost Server.</p>
+            <div style="margin-top: 16px;">
+                <input type="password" id="adminPassword" placeholder="Masukkan Password Admin" style="width: 100%; box-sizing: border-box; margin-bottom: 12px;">
+                <button onclick="loginAdmin()" style="width: 100%;">Masuk Admin Panel</button>
+            </div>
+            <p id="loginError" style="color: var(--danger); font-size: 12px; margin-top: 10px;"></p>
+        </div>
+
+        <!-- Dashboard Section -->
+        <div id="dashboardSection" class="hidden">
+            <div class="flex-between" style="margin-bottom: 20px;">
+                <div>
+                    <h1 style="margin-bottom: 4px;">Admin Token Manager</h1>
+                    <span style="color: var(--muted); font-size: 12px;">Keamanan: Localhost Loopback Only</span>
+                </div>
+                <button class="secondary" onclick="logout()">Keluar</button>
+            </div>
+
+            <!-- Generate Box -->
+            <div class="card">
+                <h3>Buat Token Baru (LOPCLIENT-XXXX-YYYY)</h3>
+                <div class="flex">
+                    <label>Jumlah: </label>
+                    <input type="number" id="genCount" value="1" min="1" max="50" style="width: 60px;">
+                    <label>Durasi:</label>
+                    <select id="genDays">
+                        <option value="7">7 Hari</option>
+                        <option value="30" selected>30 Hari</option>
+                        <option value="90">90 Hari</option>
+                        <option value="365">365 Hari (1 Tahun)</option>
+                    </select>
+                    <button onclick="generateTokens()">+ Generate Token</button>
+                </div>
+            </div>
+
+            <!-- List Box -->
+            <div class="card">
+                <div class="flex-between">
+                    <h3>Daftar Token Terdaftar</h3>
+                    <button class="secondary" onclick="fetchTokens()">Segarkan (Refresh)</button>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>KODE TOKEN</th>
+                            <th>PEMILIK (USER)</th>
+                            <th>STATUS</th>
+                            <th>EXPIRED</th>
+                            <th>AKSI</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tokenTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentPass = '';
+
+        async function loginAdmin() {
+            const pass = document.getElementById('adminPassword').value.trim();
+            const err = document.getElementById('loginError');
+            err.innerText = '';
+
+            try {
+                const res = await fetch('/api/admin/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pass })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    currentPass = pass;
+                    document.getElementById('loginSection').classList.add('hidden');
+                    document.getElementById('dashboardSection').classList.remove('hidden');
+                    fetchTokens();
+                } else {
+                    err.innerText = data.error || 'Password salah atau bukan localhost.';
+                }
+            } catch (e) {
+                err.innerText = 'Gagal menghubungi server.';
+            }
+        }
+
+        async function fetchTokens() {
+            try {
+                const res = await fetch('/api/admin/tokens/list', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: currentPass })
+                });
+                const data = await res.json();
+                if (data.tokens) renderTokens(data.tokens);
+            } catch (e) {
+                alert('Gagal mengambil daftar token');
+            }
+        }
+
+        function renderTokens(tokens) {
+            const tbody = document.getElementById('tokenTableBody');
+            tbody.innerHTML = '';
+            if (tokens.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--muted);">Belum ada token</td></tr>';
+                return;
+            }
+
+            tokens.forEach(t => {
+                const isExpired = t.expires_at && new Date() > new Date(t.expires_at);
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td class="mono" style="color: var(--primary);">${t.token}</td>
+                    <td>
+                        ${t.assigned_user ? `<span class="badge badge-claimed">${t.assigned_user}</span>` : '<span class="badge badge-unclaimed">Unclaimed (Belum Dipakai)</span>'}
+                    </td>
+                    <td>
+                        ${t.is_active ? '<span class="badge badge-active">AKTIF</span>' : '<span class="badge badge-inactive">NONAKTIF</span>'}
+                        ${isExpired ? '<span class="badge badge-inactive">EXPIRED</span>' : ''}
+                    </td>
+                    <td style="color: var(--muted); font-size: 11px;">
+                        ${t.expires_at ? new Date(t.expires_at).toLocaleDateString() : 'Lifetime'}
+                    </td>
+                    <td>
+                        <button class="secondary" style="padding: 4px 8px; font-size: 11px;" onclick="copyToken('${t.token}')">Salin</button>
+                        ${t.assigned_user ? `<button class="secondary" style="padding: 4px 8px; font-size: 11px;" onclick="resetUser('${t.token}')">Reset User</button>` : ''}
+                        <button class="danger" style="padding: 4px 8px; font-size: 11px;" onclick="deleteToken('${t.token}')">Hapus</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        async function generateTokens() {
+            const count = parseInt(document.getElementById('genCount').value) || 1;
+            const days = parseInt(document.getElementById('genDays').value) || 30;
+
+            const res = await fetch('/api/admin/tokens/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: currentPass, count, days })
+            });
+            const data = await res.json();
+            if (data.success) {
+                fetchTokens();
+            } else {
+                alert(data.error);
+            }
+        }
+
+        async function resetUser(token) {
+            if (!confirm('Lepaskan user binding untuk token ' + token + '?')) return;
+            await fetch('/api/admin/tokens/reset-user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: currentPass, token })
+            });
+            fetchTokens();
+        }
+
+        async function deleteToken(token) {
+            if (!confirm('Yakin ingin menghapus token ' + token + '?')) return;
+            await fetch('/api/admin/tokens/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: currentPass, token })
+            });
+            fetchTokens();
+        }
+
+        function copyToken(text) {
+            navigator.clipboard.writeText(text);
+            alert('Token disalin: ' + text);
+        }
+
+        function logout() {
+            currentPass = '';
+            document.getElementById('dashboardSection').classList.add('hidden');
+            document.getElementById('loginSection').classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>

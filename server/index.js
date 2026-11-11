@@ -5,7 +5,8 @@ const pino = require('pino');
 const { 
     default: makeWASocket, 
     useMultiFileAuthState, 
-    DisconnectReason 
+    DisconnectReason,
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const fs = require('fs');
 const path = require('path');
@@ -14,26 +15,118 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// ponytail: single-node SQLite DB; upgrade to PostgreSQL when scaling multi-server.
+// ponytail: SQLite for local; migrate to Postgres/Supabase when deploying to multi-instance cloud.
 const db = new DatabaseSync(path.join(__dirname, 'database.sqlite'));
 db.exec(`
-    CREATE TABLE IF NOT EXISTS tokens (
-        token TEXT PRIMARY KEY,
-        email TEXT UNIQUE,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS bot_configs (
-        email TEXT PRIMARY KEY,
-        phone TEXT,
-        prefix TEXT DEFAULT '!',
-        custom_features TEXT
-    );
+    CREATE TABLE IF NOT EXISTS tokens (token TEXT PRIMARY KEY, email TEXT UNIQUE);
+    CREATE TABLE IF NOT EXISTS bot_configs (email TEXT PRIMARY KEY, phone TEXT, prefix TEXT DEFAULT '!', custom_features TEXT);
 `);
 
-const sessions = {}; // email -> socket
-const pairingCodes = {}; // email -> code
+const sessions = new Map(); 
+const pairingCodes = new Map();
+const statuses = new Map();
 
-// Admin Token generator / Token validator endpoints
+async function connectToWhatsApp(email, phoneNumber = null) {
+    if (sessions.has(email)) {
+        return sessions.get(email);
+    }
+
+    const sessionDir = path.join(__dirname, 'sessions', email.replace(/[^a-zA-Z0-9]/g, '_'));
+    if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    const { version } = await fetchLatestBaileysVersion();
+
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        logger: pino({ level: 'silent' }),
+        browser: ['Ubuntu', 'Chrome', '120.0.0'],
+        syncFullHistory: false
+    });
+
+    sessions.set(email, sock);
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+        if (connection === 'open') {
+            console.log(`[WA] Terhubung ke WhatsApp untuk ${email}!`);
+            statuses.set(email, 'connected');
+            pairingCodes.delete(email);
+        }
+
+        if (connection === 'close') {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            console.log(`[WA] Sesi ${email} terputus (status code: ${statusCode})`);
+            sessions.delete(email);
+
+            if (statusCode === DisconnectReason.loggedOut) {
+                statuses.set(email, 'logged_out');
+                try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
+                return;
+            }
+
+            statuses.set(email, 'reconnecting');
+            console.log(`[WA] Menghubungkan ulang sesi ${email}...`);
+            setTimeout(() => connectToWhatsApp(email, phoneNumber), 2000);
+        }
+    });
+
+    if (!sock.authState.creds.registered && phoneNumber) {
+        setTimeout(async () => {
+            try {
+                const cleanPhone = phoneNumber.replace(/\D/g, '');
+                const code = await sock.requestPairingCode(cleanPhone);
+                const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
+                pairingCodes.set(email, formatted);
+                statuses.set(email, 'pairing');
+                console.log(`[WA] Pairing code untuk ${email} (${cleanPhone}): ${formatted}`);
+            } catch (e) {
+                console.error('[WA Pairing Error]:', e.message);
+            }
+        }, 3000);
+    }
+
+    return sock;
+}
+
+app.post('/api/whatsapp/pair', async (req, res) => {
+    const { email, phoneNumber } = req.body;
+    if (!email || !phoneNumber) return res.status(400).json({ error: 'Data tidak lengkap' });
+
+    const sessionDir = path.join(__dirname, 'sessions', email.replace(/[^a-zA-Z0-9]/g, '_'));
+    if (sessions.has(email)) {
+        try { sessions.get(email).end(); } catch (e) {}
+        sessions.delete(email);
+    }
+    if (fs.existsSync(sessionDir)) {
+        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
+    }
+    
+    pairingCodes.delete(email);
+    statuses.set(email, 'initiating');
+    
+    await connectToWhatsApp(email, phoneNumber);
+    
+    for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        if (pairingCodes.get(email)) {
+            return res.json({ success: true, pairingCode: pairingCodes.get(email) });
+        }
+    }
+    res.json({ success: false, message: 'Gagal membuat kode pairing, coba lagi' });
+});
+
+app.get('/api/whatsapp/status/:email', (req, res) => {
+    const { email } = req.params;
+    const isConnected = statuses.get(email) === 'connected';
+    res.json({ 
+        connected: isConnected, 
+        status: statuses.get(email) || 'disconnected',
+        pairingCode: pairingCodes.get(email) || null 
+    });
+});
+
 app.post('/api/admin/token', (req, res) => {
     const { adminKey, token, email } = req.body;
     if (adminKey !== 'LOP_SUPER_ADMIN_SECRET') return res.status(403).json({ error: 'Unauthorized' });
@@ -50,63 +143,11 @@ app.post('/api/auth/verify', (req, res) => {
     const row = db.prepare('SELECT * FROM tokens WHERE token = ?').get(token);
     if (!row) return res.status(401).json({ error: 'Invalid token' });
     if (row.email && row.email !== email) return res.status(401).json({ error: 'Token bound to another email' });
-    
-    // Bind token to email if unassigned
     if (!row.email) {
         db.prepare('UPDATE tokens SET email = ? WHERE token = ?').run(email, token);
     }
     res.json({ success: true, message: 'Verified' });
 });
 
-// Baileys WhatsApp Pairing Endpoint
-app.post('/api/whatsapp/pair', async (req, res) => {
-    const { email, phoneNumber } = req.body;
-    if (!email || !phoneNumber) return res.status(400).json({ error: 'Missing email or phone' });
-
-    const sessionDir = path.join(__dirname, 'sessions', email.replace(/[^a-zA-Z0-9]/g, '_'));
-    if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
-
-    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-
-    const sock = makeWASocket({
-        auth: state,
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false
-    });
-
-    sessions[email] = sock;
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection } = update;
-        if (connection === 'open') {
-            console.log(`WhatsApp connected for ${email}`);
-        }
-    });
-
-    if (!sock.authState.creds.registered) {
-        // Wait a second for socket initialization before requesting pairing code
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        try {
-            let code = await sock.requestPairingCode(phoneNumber);
-            code = code?.match(/.{1,4}/g)?.join('-') || code;
-            pairingCodes[email] = code;
-            return res.json({ success: true, pairingCode: code });
-        } catch (e) {
-            return res.status(500).json({ error: e.message });
-        }
-    } else {
-        return res.json({ success: true, message: 'Already connected' });
-    }
-});
-
-app.get('/api/whatsapp/status/:email', (req, res) => {
-    const { email } = req.params;
-    const sock = sessions[email];
-    const isConnected = sock?.user ? true : false;
-    res.json({ connected: isConnected, pairingCode: pairingCodes[email] || null });
-});
-
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 app.listen(PORT, () => console.log(`Lop-Client backend running on port ${PORT}`));

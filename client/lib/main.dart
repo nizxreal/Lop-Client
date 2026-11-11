@@ -1,122 +1,266 @@
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
-void main() {
-  runApp(const MyApp());
-}
+const String serverUrl = 'http://localhost:3000'; // ponytail: replace with actual VPS IP
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+void main() => runApp(const LopClientApp());
 
-  // This widget is the root of your application.
+class LopClientApp extends StatelessWidget {
+  const LopClientApp({super.key});
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      title: 'Lop-Client',
+      theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
+      home: const MainNavigator(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
-
+class MainNavigator extends StatefulWidget {
+  const MainNavigator({super.key});
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<MainNavigator> createState() => _MainNavigatorState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _MainNavigatorState extends State<MainNavigator> {
+  String? email;
+  String? token;
+  bool isVerified = false;
+  bool isAdmin = false;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  void onLogin(String mail) {
+    setState(() { 
+      email = mail;
+      isAdmin = mail == 'admin@lop.com'; // ponytail: hardcoded admin check
+    });
+  }
+
+  void onVerified(String tok) {
+    setState(() { 
+      token = tok;
+      isVerified = true; 
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    if (email == null) return AuthScreen(onLogin: onLogin);
+    if (!isVerified) return TokenScreen(email: email!, onVerified: onVerified);
+    return Dashboard(email: email!, isAdmin: isAdmin);
+  }
+}
+
+class AuthScreen extends StatelessWidget {
+  final Function(String) onLogin;
+  const AuthScreen({super.key, required this.onLogin});
+
+  @override
+  Widget build(BuildContext context) {
+    final ctrl = TextEditingController();
     return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
       body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Lop-Client', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 32),
+            TextField(controller: ctrl, decoration: const InputDecoration(labelText: 'Email Google', border: OutlineInputBorder())),
+            const SizedBox(height: 16),
+            ElevatedButton(onPressed: () => onLogin(ctrl.text), child: const Text('Login dengan Google'))
+          ]),
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+    );
+  }
+}
+
+class TokenScreen extends StatefulWidget {
+  final String email;
+  final Function(String) onVerified;
+  const TokenScreen({super.key, required this.email, required this.onVerified});
+
+  @override
+  State<TokenScreen> createState() => _TokenScreenState();
+}
+
+class _TokenScreenState extends State<TokenScreen> {
+  final ctrl = TextEditingController();
+  String? error;
+
+  Future<void> verify() async {
+    try {
+      final res = await http.post(
+        Uri.parse('$serverUrl/api/auth/verify'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': widget.email, 'token': ctrl.text}),
+      );
+      if (res.statusCode == 200) {
+        widget.onVerified(ctrl.text);
+      } else {
+        setState(() => error = jsonDecode(res.body)['error']);
+      }
+    } catch (e) {
+      setState(() => error = 'Connection failed');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Verify Token')),
+      body: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(children: [
+          Text('Halo, ${widget.email}. Masukkan Token dari Admin.'),
+          const SizedBox(height: 16),
+          TextField(controller: ctrl, decoration: InputDecoration(labelText: 'Token', errorText: error, border: const OutlineInputBorder())),
+          const SizedBox(height: 16),
+          ElevatedButton(onPressed: verify, child: const Text('Aktivasi'))
+        ]),
       ),
+    );
+  }
+}
+
+class Dashboard extends StatefulWidget {
+  final String email;
+  final bool isAdmin;
+  const Dashboard({super.key, required this.email, required this.isAdmin});
+
+  @override
+  State<Dashboard> createState() => _DashboardState();
+}
+
+class _DashboardState extends State<Dashboard> {
+  int _index = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<Widget> pages = [
+      PairingPage(email: widget.email),
+      const BotSettingsPage(),
+      if (widget.isAdmin) AdminPanel() else const Center(child: Text('Coming Soon')),
+    ];
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Lop-Client Dashboard')),
+      drawer: Drawer(
+        child: ListView(children: [
+          UserAccountsDrawerHeader(accountName: Text(widget.email), accountEmail: null),
+          ListTile(leading: const Icon(Icons.link), title: const Text('WA Pairing'), onTap: () => setState(() { _index = 0; Navigator.pop(context); })),
+          ListTile(leading: const Icon(Icons.settings), title: const Text('Bot Settings'), onTap: () => setState(() { _index = 1; Navigator.pop(context); })),
+          if (widget.isAdmin) ListTile(leading: const Icon(Icons.admin_panel_settings), title: const Text('Admin Panel'), onTap: () => setState(() { _index = 2; Navigator.pop(context); })),
+        ]),
+      ),
+      body: pages[_index],
+    );
+  }
+}
+
+class PairingPage extends StatefulWidget {
+  final String email;
+  const PairingPage({super.key, required this.email});
+  @override
+  State<PairingPage> createState() => _PairingPageState();
+}
+
+class _PairingPageState extends State<PairingPage> {
+  final phoneCtrl = TextEditingController();
+  String? pairingCode;
+  bool loading = false;
+
+  Future<void> requestPairing() async {
+    setState(() => loading = true);
+    try {
+      final res = await http.post(
+        Uri.parse('$serverUrl/api/whatsapp/pair'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': widget.email, 'phoneNumber': phoneCtrl.text}),
+      );
+      if (res.statusCode == 200) {
+        setState(() => pairingCode = jsonDecode(res.body)['pairingCode']);
+      }
+    } finally {
+      setState(() => loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(children: [
+        if (pairingCode == null) ...[
+          TextField(controller: phoneCtrl, decoration: const InputDecoration(labelText: 'Nomor WA (628xxx)', border: OutlineInputBorder())),
+          const SizedBox(height: 16),
+          ElevatedButton(onPressed: loading ? null : requestPairing, child: Text(loading ? 'Minta Kode...' : 'Dapatkan Pairing Code')),
+        ] else ...[
+          const Text('Masukkan kode ini di WhatsApp Anda:', style: TextStyle(fontSize: 18)),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(8)),
+            child: Text(pairingCode!, style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold, letterSpacing: 4)),
+          ),
+          const SizedBox(height: 32),
+          const CircularProgressIndicator(),
+          const Text('Menunggu koneksi...')
+        ]
+      ]),
+    );
+  }
+}
+
+class BotSettingsPage extends StatelessWidget {
+  const BotSettingsPage({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.all(24),
+      child: Column(children: [
+        TextField(decoration: InputDecoration(labelText: 'Custom Prefix', hintText: '!', border: OutlineInputBorder())),
+        SizedBox(height: 16),
+        ListTile(title: Text('Fitur Bawaan'), trailing: Icon(Icons.check_circle, color: Colors.green)),
+        Divider(),
+        Text('Fitur Custom (Coming Soon)'),
+      ]),
+    );
+  }
+}
+
+class AdminPanel extends StatelessWidget {
+  final tokenCtrl = TextEditingController();
+  final emailCtrl = TextEditingController();
+
+  AdminPanel({super.key});
+
+  Future<void> createToken() async {
+    await http.post(
+      Uri.parse('$serverUrl/api/admin/token'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'adminKey': 'LOP_SUPER_ADMIN_SECRET',
+        'token': tokenCtrl.text,
+        'email': emailCtrl.text.isEmpty ? null : emailCtrl.text,
+      }),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(children: [
+        const Text('Admin: Generate Token', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 16),
+        TextField(controller: tokenCtrl, decoration: const InputDecoration(labelText: 'New Token', border: OutlineInputBorder())),
+        const SizedBox(height: 16),
+        TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: 'Target Email (Optional)', border: OutlineInputBorder())),
+        const SizedBox(height: 16),
+        ElevatedButton(onPressed: createToken, child: const Text('Generate & Save')),
+      ]),
     );
   }
 }

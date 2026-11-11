@@ -3,6 +3,8 @@ node_modules/
 server/node_modules/
 server/sessions/
 server/.env
+server/database.sqlite
+*.sqlite
 *.log
 
 # Flutter & Dart

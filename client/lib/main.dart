@@ -97,6 +97,9 @@ class _MainNavigatorState extends State<MainNavigator> {
     setState(() {
       email = mail;
       isAdmin = adminStatus;
+      if (adminStatus) {
+        isVerified = true; // Admin bypasses token screen automatically
+      }
     });
   }
 
@@ -125,7 +128,7 @@ class _MainNavigatorState extends State<MainNavigator> {
 }
 
 // -------------------------------------------------------------
-// 1. SCREEN: AUTH / LOGIN DENGAN OPSI ADMIN PASSWORD lindo.1629
+// 1. SCREEN: AUTH / LOGIN
 // -------------------------------------------------------------
 class AuthScreen extends StatefulWidget {
   final Function(String, {bool adminUnlocked}) onLogin;
@@ -148,6 +151,8 @@ class _AuthScreenState extends State<AuthScreen> {
         return;
       }
     } catch (_) {
+      // Google Sign-In requires SHA-1 fingerprint registered in Firebase/Google Cloud Console.
+      // If not configured, it throws or fails. We gracefully guide user to manual login below.
     } finally {
       if (mounted) setState(() => isLoading = false);
     }
@@ -156,70 +161,50 @@ class _AuthScreenState extends State<AuthScreen> {
 
   void _showManualEmailDialog() {
     final emailCtrl = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF131B2E),
-        title: const Text('Login Email Akun Google'),
-        content: TextField(
-          controller: emailCtrl,
-          keyboardType: TextInputType.emailAddress,
-          decoration: const InputDecoration(labelText: 'Alamat Email', hintText: 'nama@gmail.com'),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Batal')),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              if (emailCtrl.text.isNotEmpty) widget.onLogin(emailCtrl.text.trim());
-            },
-            child: const Text('Masuk'),
-          )
-        ],
-      ),
-    );
-  }
-
-  void _showAdminLoginDialog() {
-    final emailCtrl = TextEditingController(text: 'admin@lop.com');
     final passCtrl = TextEditingController();
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF131B2E),
-        title: const Row(
-          children: [
-            Icon(Icons.shield, color: Colors.amber, size: 20),
-            SizedBox(width: 8),
-            Text('Login Admin Panel', style: TextStyle(fontSize: 16)),
-          ],
-        ),
+        title: const Text('Login Akun'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: 'Email Admin')),
+            const Text('Masukkan email Anda:', style: TextStyle(color: Color(0xFF94A3B8), fontSize: 13)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: emailCtrl,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(labelText: 'Alamat Email', hintText: 'nama@gmail.com'),
+            ),
             const SizedBox(height: 12),
             TextField(
               controller: passCtrl,
               obscureText: true,
-              decoration: const InputDecoration(labelText: 'Password Admin'),
+              decoration: const InputDecoration(
+                labelText: 'Password Admin (Opsional)',
+                hintText: 'Isi jika login sebagai admin',
+              ),
             ),
           ],
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Batal')),
           ElevatedButton(
-            onPressed: () async {
-              if (passCtrl.text.trim() == 'lindo.1629') {
-                Navigator.pop(ctx);
-                widget.onLogin(emailCtrl.text.trim(), adminUnlocked: true);
-              } else {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Password Admin Salah! Gunakan lindo.1629')),
-                );
+            onPressed: () {
+              Navigator.pop(ctx);
+              final mail = emailCtrl.text.trim();
+              final pass = passCtrl.text.trim();
+              if (mail.isNotEmpty) {
+                if (pass.isNotEmpty && pass == 'lindo.1629') {
+                  widget.onLogin(mail, adminUnlocked: true);
+                } else {
+                  widget.onLogin(mail);
+                }
               }
             },
-            child: const Text('Buka Admin'),
+            child: const Text('Masuk'),
           )
         ],
       ),
@@ -296,20 +281,10 @@ class _AuthScreenState extends State<AuthScreen> {
                   label: Text(isLoading ? 'Menghubungkan...' : 'Masuk dengan Google'),
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 16),
               TextButton(
                 onPressed: _showManualEmailDialog,
-                child: const Text('Masukkan email secara manual', style: TextStyle(color: Color(0xFF64748B), fontSize: 13)),
-              ),
-              const SizedBox(height: 24),
-              OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Color(0xFF334155)),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                onPressed: _showAdminLoginDialog,
-                icon: const Icon(Icons.lock_outline, size: 16, color: Colors.amber),
-                label: const Text('Masuk Mode Admin (Password)', style: TextStyle(color: Colors.amber, fontSize: 13)),
+                child: const Text('Atau masuk dengan email manual', style: TextStyle(color: Color(0xFF64748B), fontSize: 13)),
               )
             ],
           ),
@@ -320,7 +295,7 @@ class _AuthScreenState extends State<AuthScreen> {
 }
 
 // -------------------------------------------------------------
-// 2. SCREEN: TOKEN GATING
+// 2. SCREEN: TOKEN GATING (Hanya untuk User Biasa)
 // -------------------------------------------------------------
 class TokenScreen extends StatefulWidget {
   final String email;

@@ -23,6 +23,9 @@ db.exec(`
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME
     );
+    CREATE TABLE IF NOT EXISTS admins (
+        email TEXT PRIMARY KEY
+    );
     CREATE TABLE IF NOT EXISTS bot_configs (
         email TEXT PRIMARY KEY,
         phone TEXT,
@@ -31,13 +34,25 @@ db.exec(`
     );
 `);
 
+db.prepare('INSERT OR IGNORE INTO admins (email) VALUES (?)').run('admin@lop.com');
+
 const sessions = new Map(); 
 const pairingCodes = new Map();
 const statuses = new Map();
+const userLogs = new Map();
+
+function addLog(email, message) {
+    if (!userLogs.has(email)) userLogs.set(email, []);
+    const logs = userLogs.get(email);
+    const timestamp = new Date().toLocaleTimeString();
+    logs.push(`[${timestamp}] ${message}`);
+    if (logs.length > 50) logs.shift();
+}
 
 async function connectToWhatsApp(email, phoneNumber = null) {
     if (sessions.has(email)) return sessions.get(email);
 
+    addLog(email, 'Menginisialisasi sesi WhatsApp Baileys...');
     const sessionDir = path.join(__dirname, 'sessions', email.replace(/[^a-zA-Z0-9]/g, '_'));
     if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
@@ -59,13 +74,23 @@ async function connectToWhatsApp(email, phoneNumber = null) {
         if (connection === 'open') {
             statuses.set(email, 'connected');
             pairingCodes.delete(email);
+            addLog(email, 'STATUS: WhatsApp Terhubung (ONLINE)!');
         }
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             sessions.delete(email);
+            addLog(email, `STATUS: Koneksi terputus (Kode: ${statusCode || 'unknown'})`);
+            
             if (statusCode === DisconnectReason.loggedOut) {
                 statuses.set(email, 'logged_out');
+                addLog(email, 'STATUS: Perangkat telah di-logout.');
                 try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
+                return;
+            }
+            if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
+                statuses.set(email, 'reconnecting');
+                addLog(email, 'STATUS: Handshake 515 restartRequired. Menghubungkan ulang...');
+                setTimeout(() => connectToWhatsApp(email, phoneNumber), 1500);
                 return;
             }
             statuses.set(email, 'reconnecting');
@@ -74,6 +99,7 @@ async function connectToWhatsApp(email, phoneNumber = null) {
     });
 
     if (!sock.authState.creds.registered && phoneNumber) {
+        addLog(email, `Meminta kode pairing untuk nomor ${phoneNumber}...`);
         setTimeout(async () => {
             try {
                 const cleanPhone = phoneNumber.replace(/\D/g, '');
@@ -81,8 +107,9 @@ async function connectToWhatsApp(email, phoneNumber = null) {
                 const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
                 pairingCodes.set(email, formatted);
                 statuses.set(email, 'pairing');
+                addLog(email, `Kode Pairing diperoleh: ${formatted}`);
             } catch (e) {
-                console.error('[WA Pairing Error]:', e.message);
+                addLog(email, `Gagal meminta pairing: ${e.message}`);
             }
         }, 3000);
     }
@@ -104,6 +131,7 @@ app.post('/api/whatsapp/pair', async (req, res) => {
     
     pairingCodes.delete(email);
     statuses.set(email, 'initiating');
+    addLog(email, `Memulai sesi pairing baru untuk ${phoneNumber}`);
     await connectToWhatsApp(email, phoneNumber);
     
     for (let i = 0; i < 20; i++) {
@@ -115,6 +143,18 @@ app.post('/api/whatsapp/pair', async (req, res) => {
     res.json({ success: false, message: 'Timeout' });
 });
 
+app.post('/api/whatsapp/disconnect', (req, res) => {
+    const { email } = req.body;
+    if (sessions.has(email)) {
+        try { sessions.get(email).end(); } catch (e) {}
+        sessions.delete(email);
+    }
+    statuses.set(email, 'disconnected');
+    pairingCodes.delete(email);
+    addLog(email, 'WhatsApp diputuskan secara manual (DISCONNECTED).');
+    res.json({ success: true, message: 'Disconnected' });
+});
+
 app.get('/api/whatsapp/status/:email', (req, res) => {
     const { email } = req.params;
     res.json({ 
@@ -122,6 +162,27 @@ app.get('/api/whatsapp/status/:email', (req, res) => {
         status: statuses.get(email) || 'disconnected',
         pairingCode: pairingCodes.get(email) || null 
     });
+});
+
+app.get('/api/whatsapp/logs/:email', (req, res) => {
+    const { email } = req.params;
+    res.json({ logs: userLogs.get(email) || ['[SYS] Terminal log siap.'] });
+});
+
+app.post('/api/admin/login', (req, res) => {
+    const { email, password } = req.body;
+    if (password === 'lindo.1629') {
+        db.prepare('INSERT OR IGNORE INTO admins (email) VALUES (?)').run(email);
+        return res.json({ success: true, isAdmin: true });
+    }
+    res.status(401).json({ success: false, error: 'Password admin salah' });
+});
+
+app.get('/api/auth/is-admin', (req, res) => {
+    const { email } = req.query;
+    if (!email) return res.json({ isAdmin: false });
+    const row = db.prepare('SELECT * FROM admins WHERE email = ?').get(email);
+    res.json({ isAdmin: !!row });
 });
 
 app.post('/api/admin/token', (req, res) => {

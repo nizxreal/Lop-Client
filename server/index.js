@@ -34,6 +34,12 @@ db.exec(`
         key TEXT PRIMARY KEY,
         value TEXT
     );
+    CREATE TABLE IF NOT EXISTS bot_profiles (
+        user TEXT PRIMARY KEY,
+        name TEXT DEFAULT 'Lop Bot',
+        phone TEXT,
+        features TEXT DEFAULT '{"ping":true}'
+    );
 `);
 
 // Pastikan kolom-kolom baru ada jika database dibuat dengan skema lama
@@ -109,6 +115,43 @@ async function connectToWhatsApp(user, phoneNumber = null) {
 
     sessions.set(user, sock);
     sock.ev.on('creds.update', saveCreds);
+
+    // Event listener untuk pesan masuk & eksekusi command bot (fitur .ping dsb)
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return;
+        for (const msg of messages) {
+            if (!msg.message) continue;
+            const fromMe = msg.key.fromMe;
+            const sender = msg.key.remoteJid;
+            
+            // Ambil text pesan
+            const text = (
+                msg.message.conversation ||
+                msg.message.extendedTextMessage?.text ||
+                msg.message.imageMessage?.caption ||
+                ''
+            ).trim();
+
+            if (!text) continue;
+
+            // Load konfigurasi profile & fitur bot pengguna
+            let botProfile = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+            let activeFeatures = { ping: true };
+            if (botProfile && botProfile.features) {
+                try { activeFeatures = JSON.parse(botProfile.features); } catch (_) {}
+            }
+
+            // Command .ping -> Pong!
+            if (activeFeatures.ping && (text.toLowerCase() === '.ping' || text.toLowerCase() === 'ping')) {
+                addLog(user, `Menerima command ping dari ${sender}. Membalas Pong!`);
+                try {
+                    await sock.sendMessage(sender, { text: 'Pong! 🏓\nBot Lop-Client aktif dan berjalan normal.' }, { quoted: msg });
+                } catch (err) {
+                    addLog(user, `Gagal membalas pesan: ${err.message}`);
+                }
+            }
+        }
+    });
 
     sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
         if (connection === 'open') {
@@ -224,6 +267,16 @@ app.post('/api/whatsapp/pair', async (req, res) => {
     if (!email || !phoneNumber) return res.status(400).json({ error: 'Data tidak lengkap' });
 
     const user = email.trim().toLowerCase();
+    const cleanPhone = phoneNumber.replace(/\D/g, '');
+    
+    // Simpan nomor terpairing ke profile bot
+    const existing = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+    if (!existing) {
+        db.prepare('INSERT INTO bot_profiles (user, phone) VALUES (?, ?)').run(user, cleanPhone);
+    } else {
+        db.prepare('UPDATE bot_profiles SET phone = ? WHERE user = ?').run(cleanPhone, user);
+    }
+
     const sessionDir = path.join(__dirname, 'sessions', user.replace(/[^a-zA-Z0-9]/g, '_'));
     if (sessions.has(user)) {
         try { sessions.get(user).end(); } catch (e) {}
@@ -235,8 +288,8 @@ app.post('/api/whatsapp/pair', async (req, res) => {
     
     pairingCodes.delete(user);
     statuses.set(user, 'initiating');
-    addLog(user, `Memulai sesi pairing baru untuk ${phoneNumber}`);
-    await connectToWhatsApp(user, phoneNumber);
+    addLog(user, `Memulai sesi pairing baru untuk ${cleanPhone}`);
+    await connectToWhatsApp(user, cleanPhone);
     
     for (let i = 0; i < 20; i++) {
         await new Promise(r => setTimeout(r, 500));
@@ -247,6 +300,20 @@ app.post('/api/whatsapp/pair', async (req, res) => {
     res.json({ success: false, message: 'Timeout meminta kode pairing' });
 });
 
+// Tombol 1: Connect / Start Bot
+app.post('/api/whatsapp/connect', async (req, res) => {
+    const { email } = req.body;
+    const user = (email || '').trim().toLowerCase();
+    if (!user) return res.status(400).json({ error: 'User/Device ID diperlukan' });
+
+    const profile = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+    addLog(user, 'Memulai bot WhatsApp...');
+    statuses.set(user, 'connecting');
+    await connectToWhatsApp(user, profile?.phone || null);
+    res.json({ success: true, message: 'Bot WhatsApp dijalankan' });
+});
+
+// Tombol 1: Disconnect / Stop Bot (mematikan sampai diconnect ulang)
 app.post('/api/whatsapp/disconnect', (req, res) => {
     const { email } = req.body;
     const user = (email || '').trim().toLowerCase();
@@ -256,16 +323,110 @@ app.post('/api/whatsapp/disconnect', (req, res) => {
     }
     statuses.set(user, 'disconnected');
     pairingCodes.delete(user);
-    addLog(user, 'WhatsApp diputuskan secara manual (DISCONNECTED).');
+    addLog(user, 'Bot WhatsApp dimatikan secara manual (STOPPED).');
     res.json({ success: true, message: 'Disconnected' });
+});
+
+// Tombol 2: Restart Bot
+app.post('/api/whatsapp/restart', async (req, res) => {
+    const { email } = req.body;
+    const user = (email || '').trim().toLowerCase();
+    if (sessions.has(user)) {
+        try { sessions.get(user).end(); } catch (e) {}
+        sessions.delete(user);
+    }
+    addLog(user, 'Menjalankan restart bot WhatsApp...');
+    statuses.set(user, 'reconnecting');
+    const profile = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+    setTimeout(() => connectToWhatsApp(user, profile?.phone || null), 1000);
+    res.json({ success: true, message: 'Bot berhasil direstart' });
+});
+
+// Tombol 3: Repair Bot (Hapus nomor ter-pair & session creds, lepas pairing secara total)
+app.post('/api/whatsapp/repair', async (req, res) => {
+    const { email } = req.body;
+    const user = (email || '').trim().toLowerCase();
+    const sessionDir = path.join(__dirname, 'sessions', user.replace(/[^a-zA-Z0-9]/g, '_'));
+    
+    // Matikan instance Baileys jika sedang jalan
+    if (sessions.has(user)) {
+        try { sessions.get(user).end(); } catch (e) {}
+        sessions.delete(user);
+    }
+    
+    // Hapus seluruh file kredensial/session WhatsApp
+    if (fs.existsSync(sessionDir)) {
+        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
+    }
+    
+    // Lepas nomor WhatsApp dari profile di database
+    db.prepare('UPDATE bot_profiles SET phone = NULL WHERE user = ?').run(user);
+    
+    pairingCodes.delete(user);
+    statuses.set(user, 'disconnected');
+    addLog(user, 'Repair dijalankan: Seluruh session dan nomor ter-pair berhasil dihapus total. Silakan pairing ulang.');
+    
+    res.json({ success: true, message: 'Repair berhasil. Pairing dilepas total.' });
+});
+
+// Bot Profile & Features Management
+app.get('/api/bot/profile/:email', (req, res) => {
+    const user = (req.params.email || '').trim().toLowerCase();
+    let profile = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+    if (!profile) {
+        db.prepare('INSERT INTO bot_profiles (user, name, features) VALUES (?, ?, ?)').run(user, 'Lop Bot', '{"ping":true}');
+        profile = { user, name: 'Lop Bot', phone: null, features: '{"ping":true}' };
+    }
+    res.json({
+        success: true,
+        name: profile.name || 'Lop Bot',
+        phone: profile.phone || null,
+        features: profile.features ? JSON.parse(profile.features) : { ping: true }
+    });
+});
+
+app.post('/api/bot/profile', (req, res) => {
+    const { email, name } = req.body;
+    const user = (email || '').trim().toLowerCase();
+    if (!user || !name) return res.status(400).json({ error: 'Data tidak lengkap' });
+
+    const existing = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+    if (!existing) {
+        db.prepare('INSERT INTO bot_profiles (user, name) VALUES (?, ?)').run(user, name.trim());
+    } else {
+        db.prepare('UPDATE bot_profiles SET name = ? WHERE user = ?').run(name.trim(), user);
+    }
+    res.json({ success: true, message: 'Nama bot berhasil diubah' });
+});
+
+app.post('/api/bot/features', (req, res) => {
+    const { email, features } = req.body;
+    const user = (email || '').trim().toLowerCase();
+    if (!user || !features) return res.status(400).json({ error: 'Data tidak lengkap' });
+
+    const existing = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+    const jsonStr = JSON.stringify(features);
+    if (!existing) {
+        db.prepare('INSERT INTO bot_profiles (user, features) VALUES (?, ?)').run(user, jsonStr);
+    } else {
+        db.prepare('UPDATE bot_profiles SET features = ? WHERE user = ?').run(jsonStr, user);
+    }
+    res.json({ success: true, message: 'Fitur bot berhasil disimpan' });
 });
 
 app.get('/api/whatsapp/status/:email', (req, res) => {
     const user = (req.params.email || '').trim().toLowerCase();
+    const profile = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+    const sessionDir = path.join(__dirname, 'sessions', user.replace(/[^a-zA-Z0-9]/g, '_'));
+    const isPaired = fs.existsSync(sessionDir) && fs.existsSync(path.join(sessionDir, 'creds.json'));
+
     res.json({ 
         connected: statuses.get(user) === 'connected', 
-        status: statuses.get(user) || 'disconnected',
-        pairingCode: pairingCodes.get(user) || null 
+        status: statuses.get(user) || (isPaired ? 'stopped' : 'disconnected'),
+        pairingCode: pairingCodes.get(user) || null,
+        isPaired: isPaired || (profile && !!profile.phone),
+        phone: profile?.phone || null,
+        botName: profile?.name || 'Lop Bot'
     });
 });
 

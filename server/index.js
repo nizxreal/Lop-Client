@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { DatabaseSync } = require('node:sqlite');
@@ -24,7 +25,7 @@ const db = new DatabaseSync(path.join(__dirname, 'database.sqlite'));
 db.exec(`
     CREATE TABLE IF NOT EXISTS tokens (
         token TEXT PRIMARY KEY,
-        assigned_user TEXT UNIQUE,
+        assigned_user TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME,
         is_active INTEGER DEFAULT 1
@@ -35,8 +36,20 @@ db.exec(`
     );
 `);
 
+// Pastikan kolom-kolom baru ada jika database dibuat dengan skema lama
+const existingColumns = db.prepare('PRAGMA table_info(tokens)').all().map(c => c.name);
+if (!existingColumns.includes('assigned_user')) {
+    db.exec('ALTER TABLE tokens ADD COLUMN assigned_user TEXT;');
+}
+if (!existingColumns.includes('is_active')) {
+    db.exec('ALTER TABLE tokens ADD COLUMN is_active INTEGER DEFAULT 1;');
+}
+if (!existingColumns.includes('expires_at')) {
+    db.exec('ALTER TABLE tokens ADD COLUMN expires_at DATETIME;');
+}
+
 // Inisialisasi Master Admin Token jika belum ada
-const ADMIN_MASTER_TOKEN = process.env.ADMIN_TOKEN || 'LOPADMIN-MASTER-9999';
+const ADMIN_MASTER_TOKEN = (process.env.ADMIN_TOKEN || 'LOPADMIN-MASTER-9999').trim().toUpperCase();
 const existingAdmin = db.prepare('SELECT * FROM tokens WHERE token = ?').get(ADMIN_MASTER_TOKEN);
 if (!existingAdmin) {
     db.prepare('INSERT INTO tokens (token, assigned_user, is_active) VALUES (?, ?, 1)').run(ADMIN_MASTER_TOKEN, 'admin');

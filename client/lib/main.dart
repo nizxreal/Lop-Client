@@ -416,6 +416,13 @@ class _DashboardOnePageState extends State<DashboardOnePage> {
   }
 
   Future<void> toggleConnectBot() async {
+    if (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Silakan lakukan pairing bot terlebih dahulu!')),
+      );
+      return;
+    }
+
     if (isConnected || botStatus == 'connecting' || botStatus == 'reconnecting') {
       // Disconnect / Stop Bot
       try {
@@ -426,46 +433,58 @@ class _DashboardOnePageState extends State<DashboardOnePage> {
         );
       } catch (_) {}
     } else {
-      // Jika belum terpaired sama sekali, request pairing dengan nomor di input
-      if (!isPaired) {
-        final phone = phoneCtrl.text.trim();
-        if (phone.isEmpty || phone.contains('..') || phone.length < 8) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Masukkan nomor WhatsApp valid (contoh: 085123456...)')));
-          return;
-        }
-        setState(() => isPairing = true);
-        try {
-          final res = await http.post(
-            Uri.parse('$serverUrl/api/whatsapp/pair'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'email': widget.username, 'phoneNumber': phone}),
-          );
-          final body = jsonDecode(res.body);
-          if (body['success'] == true) {
-            setState(() {
-              isPaired = true;
-              pairedPhone = phone;
-            });
-          }
-        } catch (_) {
-          if (mounted) setState(() => isPairing = false);
-        }
-      } else {
-        // Connect (Start bot dengan session yang ada)
-        try {
-          await http.post(
-            Uri.parse('$serverUrl/api/whatsapp/connect'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'email': widget.username}),
-          );
-        } catch (_) {}
+      // Connect (Start bot dengan session yang ada)
+      try {
+        await http.post(
+          Uri.parse('$serverUrl/api/whatsapp/connect'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'email': widget.username}),
+        );
+      } catch (_) {}
+    }
+    refreshAll();
+  }
+
+  // Tombol Pair (muncul jika belum ada nomor yang di-pair)
+  Future<void> requestPairing() async {
+    final phone = phoneCtrl.text.trim();
+    if (phone.isEmpty || phone.contains('..') || phone.length < 8) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Masukkan nomor WhatsApp valid (contoh: 085123456...)')),
+      );
+      return;
+    }
+    setState(() => isPairing = true);
+    try {
+      final res = await http.post(
+        Uri.parse('$serverUrl/api/whatsapp/pair'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': widget.username, 'phoneNumber': phone}),
+      );
+      final body = jsonDecode(res.body);
+      if (body['success'] == true) {
+        setState(() {
+          isPaired = true;
+          pairedPhone = phone;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Kode pairing berhasil diminta. Silakan tautkan di WhatsApp.')),
+        );
       }
+    } catch (_) {
+      if (mounted) setState(() => isPairing = false);
     }
     refreshAll();
   }
 
   // Tombol 2: Restart Bot
   Future<void> restartBot() async {
+    if (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pair bot terlebih dahulu sebelum restart!')),
+      );
+      return;
+    }
     try {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Mengirim perintah restart bot...')));
       await http.post(
@@ -560,34 +579,11 @@ void _showEditBotNameDialog() {
   );
 }
 
-void _showFeaturesDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: const Color(0xFF131B2E),
-          title: const Text('Pengaturan Fitur Bot'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SwitchListTile(
-                title: const Text('Fitur Auto-Reply Ping'),
-                subtitle: const Text('Merespons pesan .ping dengan Pong!'),
-                value: features['ping'] ?? false,
-                onChanged: (v) {
-                  setDialogState(() => features['ping'] = v);
-                  toggleFeature('ping', v);
-                },
-              ),
-            ],
-          ),
-          actions: [
-            ElevatedButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Tutup'),
-            ),
-          ],
-        ),
+  void _openFeaturesScreen() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FeaturesScreen(username: widget.username, token: widget.token),
       ),
     );
   }
@@ -649,7 +645,7 @@ void _showFeaturesDialog() {
               trailing: const Icon(Icons.chevron_right, color: Color(0xFF94A3B8)),
               onTap: () {
                 Navigator.pop(context);
-                _showFeaturesDialog();
+                _openFeaturesScreen();
               },
             ),
             const Divider(),
@@ -739,14 +735,18 @@ void _showFeaturesDialog() {
               const SizedBox(height: 16),
             ],
 
-            // 3 Tombol Utama: Connect/Disconnect, Restart, Repair
+            // 3 Tombol Utama: Connect/Disconnect, Restart, Repair / Pair
             Row(
               children: [
                 Expanded(
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: isConnected ? Colors.redAccent : const Color(0xFF10B981),
-                      foregroundColor: isConnected ? Colors.white : Colors.black,
+                      backgroundColor: (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty))
+                          ? Colors.grey.shade800
+                          : (isConnected ? Colors.redAccent : const Color(0xFF10B981)),
+                      foregroundColor: (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty))
+                          ? Colors.grey.shade400
+                          : (isConnected ? Colors.white : Colors.black),
                     ),
                     onPressed: toggleConnectBot,
                     child: Text(isConnected ? 'Disconnect' : 'Connect'),
@@ -755,7 +755,14 @@ void _showFeaturesDialog() {
                 const SizedBox(width: 8),
                 Expanded(
                   child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF6366F1), foregroundColor: Colors.white),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty))
+                          ? Colors.grey.shade800
+                          : const Color(0xFF6366F1),
+                      foregroundColor: (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty))
+                          ? Colors.grey.shade400
+                          : Colors.white,
+                    ),
                     onPressed: restartBot,
                     child: const Text('Restart'),
                   ),
@@ -763,9 +770,16 @@ void _showFeaturesDialog() {
                 const SizedBox(width: 8),
                 Expanded(
                   child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFF59E0B), foregroundColor: Colors.black),
-                    onPressed: repairBot,
-                    child: const Text('Repair'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty))
+                          ? const Color(0xFF10B981)
+                          : const Color(0xFFF59E0B),
+                      foregroundColor: (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty))
+                          ? Colors.black
+                          : Colors.black,
+                    ),
+                    onPressed: (!isPaired && (pairedPhone == null || pairedPhone!.isEmpty)) ? requestPairing : repairBot,
+                    child: Text((!isPaired && (pairedPhone == null || pairedPhone!.isEmpty)) ? (isPairing ? 'Meminta...' : 'Pair') : 'Repair'),
                   ),
                 ),
               ],
@@ -1020,6 +1034,89 @@ class _AdminTokenManagerScreenState extends State<AdminTokenManagerScreen> {
                   ),
                 );
               },
+            ),
+    );
+  }
+}
+
+// -------------------------------------------------------------
+// 4. FEATURES SCREEN (PINDAHAN DARI POPUP)
+// -------------------------------------------------------------
+class FeaturesScreen extends StatefulWidget {
+  final String username;
+  final String token;
+  const FeaturesScreen({super.key, required this.username, required this.token});
+
+  @override
+  State<FeaturesScreen> createState() => _FeaturesScreenState();
+}
+
+class _FeaturesScreenState extends State<FeaturesScreen> {
+  Map<String, bool> features = {'ping': true};
+  bool isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    fetchFeatures();
+  }
+
+  Future<void> fetchFeatures() async {
+    try {
+      final res = await http.get(Uri.parse('$serverUrl/api/bot/features/${widget.username}'));
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        if (mounted) {
+          setState(() {
+            features = Map<String, bool>.from(data['features'] ?? {'ping': true});
+            isLoading = false;
+          });
+        }
+      }
+    } catch (_) {
+      if (mounted) setState(() => isLoading = false);
+    }
+  }
+
+  Future<void> toggleFeature(String key, bool val) async {
+    final updated = Map<String, bool>.from(features);
+    updated[key] = val;
+    setState(() => features = updated);
+    try {
+      await http.post(
+        Uri.parse('$serverUrl/api/bot/features'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'email': widget.username, 'features': updated}),
+      );
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Fitur Bot WhatsApp'),
+        backgroundColor: const Color(0xFF0F172A),
+      ),
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                const Text('PENGATURAN COMMAND', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF94A3B8), letterSpacing: 1)),
+                const SizedBox(height: 12),
+                Card(
+                  child: SwitchListTile(
+                    title: const Text('Auto-Reply Ping', style: TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: const Text('Merespons pesan ".ping" dengan "Pong!" secara otomatis.'),
+                    value: features['ping'] ?? false,
+                    activeColor: const Color(0xFF10B981),
+                    onChanged: (v) => toggleFeature('ping', v),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                const Text('Fitur lainnya akan ditambahkan secara bertahap melalui update server.', style: TextStyle(fontSize: 11, color: Color(0xFF64748B)), textAlign: TextAlign.center),
+              ],
             ),
     );
   }

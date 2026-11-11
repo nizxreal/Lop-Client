@@ -79,6 +79,7 @@ const sessions = new Map();
 const pairingCodes = new Map();
 const statuses = new Map();
 const userLogs = new Map();
+const manualDisconnects = new Set(); // Ponytail: track manual stop to prevent auto-reconnect
 
 function addLog(user, message) {
     if (!userLogs.has(user)) userLogs.set(user, []);
@@ -170,6 +171,14 @@ async function connectToWhatsApp(user, phoneNumber = null) {
                 try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
                 return;
             }
+
+            // Jika user sengaja menekan Disconnect, jangan auto-reconnect
+            if (manualDisconnects.has(user)) {
+                statuses.set(user, 'disconnected');
+                addLog(user, 'STATUS: Bot dimatikan oleh user. Tidak melakukan auto-reconnect.');
+                return;
+            }
+
             if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
                 statuses.set(user, 'reconnecting');
                 addLog(user, 'STATUS: Handshake 515 restartRequired. Menghubungkan ulang...');
@@ -306,6 +315,7 @@ app.post('/api/whatsapp/connect', async (req, res) => {
     const user = (email || '').trim().toLowerCase();
     if (!user) return res.status(400).json({ error: 'User/Device ID diperlukan' });
 
+    manualDisconnects.delete(user);
     const profile = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
     addLog(user, 'Memulai bot WhatsApp...');
     statuses.set(user, 'connecting');
@@ -317,6 +327,7 @@ app.post('/api/whatsapp/connect', async (req, res) => {
 app.post('/api/whatsapp/disconnect', (req, res) => {
     const { email } = req.body;
     const user = (email || '').trim().toLowerCase();
+    manualDisconnects.add(user);
     if (sessions.has(user)) {
         try { sessions.get(user).end(); } catch (e) {}
         sessions.delete(user);
@@ -331,6 +342,7 @@ app.post('/api/whatsapp/disconnect', (req, res) => {
 app.post('/api/whatsapp/restart', async (req, res) => {
     const { email } = req.body;
     const user = (email || '').trim().toLowerCase();
+    manualDisconnects.delete(user);
     if (sessions.has(user)) {
         try { sessions.get(user).end(); } catch (e) {}
         sessions.delete(user);
@@ -346,6 +358,7 @@ app.post('/api/whatsapp/restart', async (req, res) => {
 app.post('/api/whatsapp/repair', async (req, res) => {
     const { email } = req.body;
     const user = (email || '').trim().toLowerCase();
+    manualDisconnects.add(user);
     const sessionDir = path.join(__dirname, 'sessions', user.replace(/[^a-zA-Z0-9]/g, '_'));
     
     // Matikan instance Baileys jika sedang jalan
@@ -370,6 +383,15 @@ app.post('/api/whatsapp/repair', async (req, res) => {
 });
 
 // Bot Profile & Features Management
+app.get('/api/bot/features/:email', (req, res) => {
+    const user = (req.params.email || '').trim().toLowerCase();
+    const profile = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);
+    res.json({
+        success: true,
+        features: profile && profile.features ? JSON.parse(profile.features) : { ping: true }
+    });
+});
+
 app.get('/api/bot/profile/:email', (req, res) => {
     const user = (req.params.email || '').trim().toLowerCase();
     let profile = db.prepare('SELECT * FROM bot_profiles WHERE user = ?').get(user);

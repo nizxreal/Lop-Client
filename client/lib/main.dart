@@ -1063,7 +1063,9 @@ class _FeaturesScreenState extends State<FeaturesScreen> {
 
   Future<void> fetchFeatures() async {
     try {
-      final res = await http.get(Uri.parse('$serverUrl/api/bot/features/${widget.username}'));
+      final res = await http
+          .get(Uri.parse('$serverUrl/api/bot/features/${widget.username}'))
+          .timeout(const Duration(seconds: 4));
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         if (mounted) {
@@ -1072,9 +1074,14 @@ class _FeaturesScreenState extends State<FeaturesScreen> {
             isLoading = false;
           });
         }
+        return;
       }
-    } catch (_) {
-      if (mounted) setState(() => isLoading = false);
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        features = {'ping': true};
+        isLoading = false;
+      });
     }
   }
 

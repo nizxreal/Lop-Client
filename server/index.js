@@ -17,14 +17,9 @@ app.use(cors());
 
 const db = new DatabaseSync(path.join(__dirname, 'database.sqlite'));
 db.exec(`
-    CREATE TABLE IF NOT EXISTS tokens (
-        token TEXT PRIMARY KEY,
-        email TEXT UNIQUE,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        expires_at DATETIME
-    );
-    CREATE TABLE IF NOT EXISTS admins (
-        email TEXT PRIMARY KEY
+    CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT
     );
     CREATE TABLE IF NOT EXISTS bot_configs (
         email TEXT PRIMARY KEY,
@@ -34,7 +29,14 @@ db.exec(`
     );
 `);
 
-db.prepare('INSERT OR IGNORE INTO admins (email) VALUES (?)').run('admin@lop.com');
+function getConfig(key, defaultValue = '') {
+    const row = db.prepare('SELECT value FROM config WHERE key = ?').get(key);
+    return row ? row.value : defaultValue;
+}
+
+function setConfig(key, value) {
+    db.prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)').run(key, value);
+}
 
 const sessions = new Map(); 
 const pairingCodes = new Map();
@@ -169,67 +171,50 @@ app.get('/api/whatsapp/logs/:email', (req, res) => {
     res.json({ logs: userLogs.get(email) || ['[SYS] Terminal log siap.'] });
 });
 
-app.post('/api/admin/login', (req, res) => {
-    const { email, password } = req.body;
-    if (password === 'lindo.1629') {
-        db.prepare('INSERT OR IGNORE INTO admins (email) VALUES (?)').run(email);
-        return res.json({ success: true, isAdmin: true });
+// AUTH VERIFY via Google Apps Script Web App (with default fallback test tokens)
+app.post('/api/auth/verify', async (req, res) => {
+    const { username, token } = req.body;
+    if (!username || !token) return res.status(400).json({ error: 'Username dan Token wajib diisi' });
+
+    const appsScriptUrl = getConfig('apps_script_url', '');
+
+    if (appsScriptUrl) {
+        try {
+            const fetch = (await import('node-fetch')).default || global.fetch;
+            const resp = await fetch(`${appsScriptUrl}?token=${encodeURIComponent(token)}&username=${encodeURIComponent(username)}`);
+            const data = await resp.json();
+            if (data.valid && data.active && !data.expired) {
+                return res.json({ success: true, isAdmin: !!data.isAdmin, username: data.username || username });
+            } else {
+                return res.status(401).json({ error: data.error || 'Token tidak valid, expired, atau tidak aktif di AppsScript' });
+            }
+        } catch (e) {
+            return res.status(500).json({ error: 'Gagal menghubungi Google Apps Script: ' + e.message });
+        }
+    } else {
+        // Built-in fallback for out-of-the-box testing before Apps Script URL is set
+        if (token === 'LOP-ADMIN-MASTER') {
+            return res.json({ success: true, isAdmin: true, username: username || 'admin' });
+        }
+        if (token === 'LOP-USER-TEST') {
+            return res.json({ success: true, isAdmin: false, username: username || 'user' });
+        }
+        return res.status(401).json({ error: 'Token tidak valid. (Belum set Apps Script URL atau token salah)' });
     }
-    res.status(401).json({ success: false, error: 'Password admin salah' });
 });
 
-app.get('/api/auth/is-admin', (req, res) => {
-    const { email } = req.query;
-    if (!email) return res.json({ isAdmin: false });
-    const row = db.prepare('SELECT * FROM admins WHERE email = ?').get(email);
-    res.json({ isAdmin: !!row });
-});
-
-app.post('/api/admin/token', (req, res) => {
-    const { adminKey, token, email, expiresInDays = 30 } = req.body;
+// Admin configuration endpoints
+app.post('/api/admin/config', (req, res) => {
+    const { adminKey, appsScriptUrl } = req.body;
     if (adminKey !== 'LOP_SUPER_ADMIN_SECRET') return res.status(403).json({ error: 'Unauthorized' });
-    try {
-        const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
-        db.prepare('INSERT OR REPLACE INTO tokens (token, email, expires_at) VALUES (?, ?, ?)').run(token, email || null, expiresAt);
-        res.json({ success: true, token, expiresAt });
-    } catch (e) {
-        res.status(400).json({ error: e.message });
-    }
+    setConfig('apps_script_url', appsScriptUrl || '');
+    res.json({ success: true, appsScriptUrl: getConfig('apps_script_url') });
 });
 
-app.get('/api/admin/tokens', (req, res) => {
+app.get('/api/admin/config', (req, res) => {
     const { adminKey } = req.query;
     if (adminKey !== 'LOP_SUPER_ADMIN_SECRET') return res.status(403).json({ error: 'Unauthorized' });
-    try {
-        const rows = db.prepare('SELECT * FROM tokens').all();
-        res.json({ success: true, tokens: rows });
-    } catch (e) {
-        res.status(400).json({ error: e.message });
-    }
-});
-
-app.post('/api/admin/token/delete', (req, res) => {
-    const { adminKey, token } = req.body;
-    if (adminKey !== 'LOP_SUPER_ADMIN_SECRET') return res.status(403).json({ error: 'Unauthorized' });
-    db.prepare('DELETE FROM tokens WHERE token = ?').run(token);
-    res.json({ success: true });
-});
-
-app.post('/api/auth/verify', (req, res) => {
-    const { email, token } = req.body;
-    const row = db.prepare('SELECT * FROM tokens WHERE token = ?').get(token);
-    if (!row) return res.status(401).json({ error: 'Token tidak valid' });
-    
-    if (row.expires_at && new Date(row.expires_at) < new Date()) {
-        return res.status(401).json({ error: 'Token sudah kedaluwarsa (expired)' });
-    }
-
-    if (row.email && row.email !== email) return res.status(401).json({ error: 'Token terikat ke akun Google lain' });
-    
-    if (!row.email) {
-        db.prepare('UPDATE tokens SET email = ? WHERE token = ?').run(email, token);
-    }
-    res.json({ success: true, message: 'Verified' });
+    res.json({ success: true, appsScriptUrl: getConfig('apps_script_url') });
 });
 
 const PORT = process.env.PORT || 3000;

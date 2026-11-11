@@ -35,6 +35,13 @@ db.exec(`
     );
 `);
 
+// Inisialisasi Master Admin Token jika belum ada
+const ADMIN_MASTER_TOKEN = process.env.ADMIN_TOKEN || 'LOPADMIN-MASTER-9999';
+const existingAdmin = db.prepare('SELECT * FROM tokens WHERE token = ?').get(ADMIN_MASTER_TOKEN);
+if (!existingAdmin) {
+    db.prepare('INSERT INTO tokens (token, assigned_user, is_active) VALUES (?, ?, 1)').run(ADMIN_MASTER_TOKEN, 'admin');
+}
+
 // Admin secret password
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'lindo.1629';
 
@@ -140,13 +147,25 @@ async function connectToWhatsApp(user, phoneNumber = null) {
 // 1. PUBLIC API UNTUK APLIKASI CLIENT (FLUTTER)
 // -------------------------------------------------------------
 
-// Verifikasi & Binding Token ke Akun Gmail / Username
+// Verifikasi & Binding Token ke Akun Device ID / Username
 app.post('/api/auth/verify', (req, res) => {
     const { username, token } = req.body;
-    if (!username || !token) return res.status(400).json({ error: 'Username/Email dan Token wajib diisi.' });
+    if (!username || !token) return res.status(400).json({ error: 'Device ID dan Token wajib diisi.' });
 
     const cleanUser = username.trim().toLowerCase();
     const cleanToken = token.trim().toUpperCase();
+
+    // Check if token is Admin Master Token
+    if (cleanToken === ADMIN_MASTER_TOKEN) {
+        return res.json({
+            success: true,
+            isAdmin: true,
+            message: 'Login sebagai Super Admin berhasil.',
+            username: 'admin',
+            token: ADMIN_MASTER_TOKEN,
+            expiresAt: null
+        });
+    }
 
     const row = db.prepare('SELECT * FROM tokens WHERE token = ?').get(cleanToken);
     if (!row) {
@@ -161,24 +180,25 @@ app.post('/api/auth/verify', (req, res) => {
         return res.status(403).json({ error: 'Token ini sudah kedaluwarsa (Expired).' });
     }
 
-    // Jika token sudah terikat ke akun lain
+    // Jika token sudah terikat ke device lain
     if (row.assigned_user && row.assigned_user !== cleanUser) {
-        return res.status(403).json({ error: 'Token ini sudah digunakan oleh akun lain.' });
+        return res.status(403).json({ error: 'Token ini sudah digunakan pada perangkat lain.' });
     }
 
-    // Periksa apakah user ini sudah punya token lain
+    // Periksa apakah device ini sudah punya token lain
     const existingBinding = db.prepare('SELECT * FROM tokens WHERE assigned_user = ?').get(cleanUser);
     if (existingBinding && existingBinding.token !== cleanToken) {
-        return res.status(403).json({ error: `Akun ini sudah terikat ke token lain (${existingBinding.token}). 1 akun hanya berhak 1 token.` });
+        return res.status(403).json({ error: `Perangkat ini sudah terikat ke token lain (${existingBinding.token}). 1 perangkat hanya berhak 1 token.` });
     }
 
-    // Bind token ke user jika belum ada pemilik
+    // Bind token ke device jika belum ada pemilik
     if (!row.assigned_user) {
         db.prepare('UPDATE tokens SET assigned_user = ? WHERE token = ?').run(cleanUser, cleanToken);
     }
 
     res.json({ 
         success: true, 
+        isAdmin: false,
         message: 'Aktivasi berhasil.', 
         username: cleanUser,
         token: cleanToken,
@@ -259,10 +279,12 @@ app.post('/api/admin/login', requireLocalhost, (req, res) => {
     res.status(401).json({ error: 'Password Admin Salah' });
 });
 
-// Generate Token LOPCLIENT-XXXX-YYYY
-app.post('/api/admin/tokens/generate', requireLocalhost, (req, res) => {
-    const { password, count = 1, days = 30 } = req.body;
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Password Admin Salah' });
+// Generate Token LOPCLIENT-XXXX-YYYY (Dukungan token Admin)
+app.post('/api/admin/tokens/generate', (req, res) => {
+    const { password, count = 1, days = 30, adminToken } = req.body;
+    if (password !== ADMIN_PASSWORD && adminToken !== ADMIN_MASTER_TOKEN) {
+        return res.status(401).json({ error: 'Autentikasi Admin Gagal' });
+    }
 
     const createdTokens = [];
     const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
@@ -282,37 +304,45 @@ app.post('/api/admin/tokens/generate', requireLocalhost, (req, res) => {
     res.json({ success: true, tokens: createdTokens, expiresAt });
 });
 
-// List semua token
-app.post('/api/admin/tokens/list', requireLocalhost, (req, res) => {
-    const { password } = req.body;
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Password Admin Salah' });
+// List semua token (Dukungan token Admin)
+app.post('/api/admin/tokens/list', (req, res) => {
+    const { password, adminToken } = req.body;
+    if (password !== ADMIN_PASSWORD && adminToken !== ADMIN_MASTER_TOKEN) {
+        return res.status(401).json({ error: 'Autentikasi Admin Gagal' });
+    }
 
     const rows = db.prepare('SELECT * FROM tokens ORDER BY created_at DESC').all();
     res.json({ success: true, tokens: rows });
 });
 
 // Reset user / Hapus binding akun dari token
-app.post('/api/admin/tokens/reset-user', requireLocalhost, (req, res) => {
-    const { password, token } = req.body;
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Password Admin Salah' });
+app.post('/api/admin/tokens/reset-user', (req, res) => {
+    const { password, token, adminToken } = req.body;
+    if (password !== ADMIN_PASSWORD && adminToken !== ADMIN_MASTER_TOKEN) {
+        return res.status(401).json({ error: 'Autentikasi Admin Gagal' });
+    }
 
     db.prepare('UPDATE tokens SET assigned_user = NULL WHERE token = ?').run(token);
     res.json({ success: true, message: 'User binding berhasil di-reset.' });
 });
 
 // Hapus token
-app.post('/api/admin/tokens/delete', requireLocalhost, (req, res) => {
-    const { password, token } = req.body;
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Password Admin Salah' });
+app.post('/api/admin/tokens/delete', (req, res) => {
+    const { password, token, adminToken } = req.body;
+    if (password !== ADMIN_PASSWORD && adminToken !== ADMIN_MASTER_TOKEN) {
+        return res.status(401).json({ error: 'Autentikasi Admin Gagal' });
+    }
 
     db.prepare('DELETE FROM tokens WHERE token = ?').run(token);
     res.json({ success: true, message: 'Token dihapus.' });
 });
 
 // Toggle status aktif/nonaktif token
-app.post('/api/admin/tokens/toggle', requireLocalhost, (req, res) => {
-    const { password, token, isActive } = req.body;
-    if (password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Password Admin Salah' });
+app.post('/api/admin/tokens/toggle', (req, res) => {
+    const { password, token, isActive, adminToken } = req.body;
+    if (password !== ADMIN_PASSWORD && adminToken !== ADMIN_MASTER_TOKEN) {
+        return res.status(401).json({ error: 'Autentikasi Admin Gagal' });
+    }
 
     db.prepare('UPDATE tokens SET is_active = ? WHERE token = ?').run(isActive ? 1 : 0, token);
     res.json({ success: true, message: 'Status token diperbarui.' });

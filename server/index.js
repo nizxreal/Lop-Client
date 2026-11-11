@@ -292,7 +292,7 @@ app.post('/api/admin/login', requireLocalhost, (req, res) => {
     res.status(401).json({ error: 'Password Admin Salah' });
 });
 
-// Generate Token LOPCLIENT-XXXX-YYYY (Dukungan token Admin)
+// Generate Token LOPCLIENT-XXXX-YYYY (Dukungan custom durasi hari)
 app.post('/api/admin/tokens/generate', (req, res) => {
     const { password, count = 1, days = 30, adminToken } = req.body;
     if (password !== ADMIN_PASSWORD && adminToken !== ADMIN_MASTER_TOKEN) {
@@ -300,7 +300,8 @@ app.post('/api/admin/tokens/generate', (req, res) => {
     }
 
     const createdTokens = [];
-    const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    const numDays = parseInt(days) || 30;
+    const expiresAt = new Date(Date.now() + numDays * 24 * 60 * 60 * 1000).toISOString();
 
     for (let i = 0; i < count; i++) {
         let tok = generateRandomToken();

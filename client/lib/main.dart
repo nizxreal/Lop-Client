@@ -1,21 +1,42 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
-// Default backend server URL (dapat diganti lewat ikon settings di login)
+// Default backend server URL (dapat diganti via ikon settings di login)
 String serverUrl = 'http://192.168.111.98:3000';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const LopClientApp());
+  
+  // Cek apakah ada saved token sebelumnya agar langsung masuk dashboard (tidak reset saat restart app)
+  final prefs = await SharedPreferences.getInstance();
+  final savedToken = prefs.getString('saved_token');
+  final savedUsername = prefs.getString('saved_username');
+  final savedIsAdmin = prefs.getBool('saved_is_admin') ?? false;
+
+  runApp(LopClientApp(
+    initialToken: savedToken,
+    initialUsername: savedUsername,
+    initialIsAdmin: savedIsAdmin,
+  ));
 }
 
 class LopClientApp extends StatelessWidget {
-  const LopClientApp({super.key});
+  final String? initialToken;
+  final String? initialUsername;
+  final bool initialIsAdmin;
+
+  const LopClientApp({
+    super.key,
+    this.initialToken,
+    this.initialUsername,
+    this.initialIsAdmin = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -66,7 +87,9 @@ class LopClientApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const AuthScreen(),
+      home: (initialToken != null && initialUsername != null)
+          ? DashboardOnePage(username: initialUsername!, token: initialToken!, isAdmin: initialIsAdmin)
+          : const AuthScreen(),
     );
   }
 }
@@ -86,7 +109,6 @@ class _AuthScreenState extends State<AuthScreen> {
   bool isLoading = false;
   String? error;
 
-  // ponytail: fallback file storage untuk persist Device ID tanpa dependensi pihak ketiga
   Future<String> _getOrGenerateDeviceId() async {
     try {
       final appDir = Directory.systemTemp;
@@ -128,6 +150,12 @@ class _AuthScreenState extends State<AuthScreen> {
 
       final body = jsonDecode(res.body);
       if (res.statusCode == 200 && body['success'] == true) {
+        // Simpan sesi login agar tidak reset saat restart app
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('saved_token', body['token']);
+        await prefs.setString('saved_username', body['username']);
+        await prefs.setBool('saved_is_admin', body['isAdmin'] == true);
+
         if (!mounted) return;
         Navigator.pushReplacement(
           context,
@@ -256,7 +284,7 @@ class _AuthScreenState extends State<AuthScreen> {
 }
 
 // -------------------------------------------------------------
-// 2. DASHBOARD SATU HALAMAN + ADMIN GENERATOR DI DRAWER
+// 2. DASHBOARD SATU HALAMAN + ADMIN GENERATOR & TABEL TOKEN DI DRAWER
 // -------------------------------------------------------------
 class DashboardOnePage extends StatefulWidget {
   final String username;
@@ -282,10 +310,6 @@ class _DashboardOnePageState extends State<DashboardOnePage> {
   List<String> terminalLogs = ['[SYS] Terminal log siap.'];
   Timer? pollTimer;
   Map<String, bool> features = {'ping': true};
-
-  // State Generator Token (Jika Login Sebagai Admin)
-  List<String> generatedTokens = [];
-  bool isGenerating = false;
 
   @override
   void initState() {
@@ -364,36 +388,31 @@ class _DashboardOnePageState extends State<DashboardOnePage> {
     }
   }
 
-  Future<void> disconnectWhatsApp() async {
-    try {
-      await http.post(
-        Uri.parse('$serverUrl/api/whatsapp/disconnect'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'email': widget.username}),
-      );
-      setState(() {
-        isConnected = false;
-        pairingCode = null;
-      });
-    } catch (_) {}
+  // Disconnect UI saja TANPA menghapus pairing / session Baileys di latar belakang
+  void disconnectUIOnly() {
+    setState(() {
+      isConnected = false;
+      pairingCode = null;
+      isPairing = false;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Tampilan ditutup. Bot tetap berjalan di latar belakang server.')));
   }
 
-  Future<void> generateTokenFromApp() async {
-    setState(() => isGenerating = true);
-    try {
-      final res = await http.post(
-        Uri.parse('$serverUrl/api/admin/tokens/generate'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'adminToken': widget.token, 'count': 1, 'days': 30}),
-      );
-      final data = jsonDecode(res.body);
-      if (data['success'] == true) {
-        setState(() {
-          generatedTokens.insert(0, data['tokens'][0]);
-        });
-      }
-    } catch (_) {}
-    if (mounted) setState(() => isGenerating = false);
+  Future<void> logoutApp() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('saved_token');
+    await prefs.remove('saved_username');
+    await prefs.remove('saved_is_admin');
+
+    if (!mounted) return;
+    Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AuthScreen()));
+  }
+
+  void _openAdminTokenManager() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => AdminTokenManagerScreen(adminToken: widget.token)),
+    );
   }
 
   @override
@@ -433,46 +452,24 @@ class _DashboardOnePageState extends State<DashboardOnePage> {
             ),
             const Divider(),
 
-            // Panel Generator Khusus Admin
+            // Panel Generator & Tabel Token Khusus Admin
             if (widget.isAdmin) ...[
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Text('PANEL ADMIN (TOKEN GENERATOR)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF10B981))),
-              ),
               ListTile(
-                leading: const Icon(Icons.add_moderator, color: Color(0xFF10B981)),
-                title: const Text('Generate Token Baru'),
-                subtitle: const Text('Format LOPCLIENT-XXXX-YYYY (30 Hari)'),
-                trailing: isGenerating ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) : null,
-                onTap: isGenerating ? null : generateTokenFromApp,
+                leading: const Icon(Icons.admin_panel_settings, color: Color(0xFF10B981)),
+                title: const Text('Kelola & Generate Token'),
+                subtitle: const Text('Opsi 7 hari, 2 minggu, 1 bulan, custom'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _openAdminTokenManager();
+                },
               ),
-              if (generatedTokens.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  child: Column(
-                    children: generatedTokens.map((t) => Card(
-                      color: const Color(0xFF1E293B),
-                      child: ListTile(
-                        dense: true,
-                        title: Text(t, style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold, color: Color(0xFF10B981))),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.copy, size: 18),
-                          onPressed: () {
-                            Clipboard.setData(ClipboardData(text: t));
-                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Token disalin ke Clipboard!')));
-                          },
-                        ),
-                      ),
-                    )).toList(),
-                  ),
-                ),
               const Divider(),
             ],
 
             ListTile(
               leading: const Icon(Icons.logout, color: Colors.redAccent),
               title: const Text('Logout / Ganti Token'),
-              onTap: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const AuthScreen())),
+              onTap: logoutApp,
             ),
           ],
         ),
@@ -491,7 +488,7 @@ class _DashboardOnePageState extends State<DashboardOnePage> {
                     CircleAvatar(radius: 6, backgroundColor: isConnected ? Colors.green : Colors.red),
                     const SizedBox(width: 12),
                     Text(
-                      isConnected ? 'Status: ONLINE' : 'Status: OFFLINE',
+                      isConnected ? 'Status: ONLINE (Latar Belakang)' : 'Status: OFFLINE',
                       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                     ),
                   ],
@@ -513,15 +510,15 @@ class _DashboardOnePageState extends State<DashboardOnePage> {
               children: [
                 Expanded(
                   child: ElevatedButton(
-                    onPressed: isConnected ? disconnectWhatsApp : (isPairing ? null : requestPairing),
-                    child: Text(isConnected ? 'Disconnect' : (isPairing ? 'Meminta Kode...' : 'Hubungkan')),
+                    onPressed: isPairing ? null : requestPairing,
+                    child: Text(isPairing ? 'Meminta Kode...' : 'Hubungkan / Re-Pair'),
                   ),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: OutlinedButton(
-                    onPressed: requestPairing,
-                    child: const Text('Re-Pair'),
+                    onPressed: disconnectUIOnly,
+                    child: const Text('Disconnect (Background Run)'),
                   ),
                 ),
               ],
@@ -571,6 +568,212 @@ class _DashboardOnePageState extends State<DashboardOnePage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+// -------------------------------------------------------------
+// 3. ADMIN TOKEN MANAGER SCREEN (TABEL TOKEN & OPSI GENERATE)
+// -------------------------------------------------------------
+class AdminTokenManagerScreen extends StatefulWidget {
+  final String adminToken;
+  const AdminTokenManagerScreen({super.key, required this.adminToken});
+
+  @override
+  State<AdminTokenManagerScreen> createState() => _AdminTokenManagerScreenState();
+}
+
+class _AdminTokenManagerScreenState extends State<AdminTokenManagerScreen> {
+  List<dynamic> tokensList = [];
+  bool isLoading = true;
+  String selectedDuration = '30'; // Default 1 bulan (30 hari)
+  final customDaysCtrl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    fetchTokens();
+  }
+
+  Future<void> fetchTokens() async {
+    setState(() => isLoading = true);
+    try {
+      final res = await http.post(
+        Uri.parse('$serverUrl/api/admin/tokens/list'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'adminToken': widget.adminToken}),
+      );
+      final body = jsonDecode(res.body);
+      if (body['success'] == true) {
+        setState(() => tokensList = body['tokens']);
+      }
+    } catch (_) {}
+    if (mounted) setState(() => isLoading = false);
+  }
+
+  Future<void> generateNewToken(int days) async {
+    try {
+      final res = await http.post(
+        Uri.parse('$serverUrl/api/admin/tokens/generate'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'adminToken': widget.adminToken, 'count': 1, 'days': days}),
+      );
+      final body = jsonDecode(res.body);
+      if (body['success'] == true) {
+        fetchTokens();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Token Berhasil Dibuat: ${body['tokens'][0]}')));
+      }
+    } catch (_) {}
+  }
+
+  Future<void> deleteToken(String token) async {
+    try {
+      await http.post(
+        Uri.parse('$serverUrl/api/admin/tokens/delete'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'adminToken': widget.adminToken, 'token': token}),
+      );
+      fetchTokens();
+    } catch (_) {}
+  }
+
+  Future<void> resetUserBinding(String token) async {
+    try {
+      await http.post(
+        Uri.parse('$serverUrl/api/admin/tokens/reset-user'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'adminToken': widget.adminToken, 'token': token}),
+      );
+      fetchTokens();
+    } catch (_) {}
+  }
+
+  void _showGenerateDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF131B2E),
+          title: const Text('Generate Token Baru'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                value: selectedDuration,
+                dropdownColor: const Color(0xFF1E293B),
+                decoration: const InputDecoration(labelText: 'Masa Aktif'),
+                items: const [
+                  DropdownMenuItem(value: '7', child: Text('7 Hari (1 Minggu)')),
+                  DropdownMenuItem(value: '14', child: Text('14 Hari (2 Minggu)')),
+                  DropdownMenuItem(value: '30', child: Text('30 Hari (1 Bulan)')),
+                  DropdownMenuItem(value: 'custom', child: Text('Custom Hari')),
+                ],
+                onChanged: (v) => setState(() => selectedDuration = v ?? '30'),
+              ),
+              if (selectedDuration == 'custom') ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: customDaysCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Jumlah Hari', hintText: 'Contoh: 45'),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Batal')),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                int days = 30;
+                if (selectedDuration == 'custom') {
+                  days = int.tryParse(customDaysCtrl.text.trim()) ?? 30;
+                } else {
+                  days = int.tryParse(selectedDuration) ?? 30;
+                }
+                generateNewToken(days);
+              },
+              child: const Text('Generate'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Manajemen Token & Masa Aktif'),
+        backgroundColor: const Color(0xFF0F172A),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _showGenerateDialog,
+        backgroundColor: const Color(0xFF10B981),
+        foregroundColor: Colors.black,
+        icon: const Icon(Icons.add),
+        label: const Text('Buat Token'),
+      ),
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: tokensList.length,
+              itemBuilder: (context, index) {
+                final item = tokensList[index];
+                final token = item['token'];
+                final assignedUser = item['assigned_user'] ?? 'Belum Digunakan';
+                final expiresAt = item['expires_at'] ?? 'Selamanya';
+                final isActive = item['is_active'] == 1;
+
+                return Card(
+                  margin: const EdgeInsets.only(bottom: 12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(token, style: const TextStyle(fontFamily: 'monospace', fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF10B981))),
+                            IconButton(
+                              icon: const Icon(Icons.copy, size: 18),
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(text: token));
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Token disalin!')));
+                              },
+                            ),
+                          ],
+                        ),
+                        const Divider(),
+                        Text('Perangkat: $assignedUser', style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8))),
+                        const SizedBox(height: 4),
+                        Text('Expired: $expiresAt', style: const TextStyle(fontSize: 12, color: Color(0xFF94A3B8))),
+                        const SizedBox(height: 10),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            if (item['assigned_user'] != null)
+                              TextButton.icon(
+                                icon: const Icon(Icons.lock_reset, size: 16, color: Colors.amber),
+                                label: const Text('Reset Binding', style: TextStyle(color: Colors.amber, fontSize: 12)),
+                                onPressed: () => resetUserBinding(token),
+                              ),
+                            TextButton.icon(
+                              icon: const Icon(Icons.delete, size: 16, color: Colors.redAccent),
+                              label: const Text('Hapus', style: TextStyle(color: Colors.redAccent, fontSize: 12)),
+                              onPressed: () => deleteToken(token),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
     );
   }
 }

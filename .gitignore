@@ -1,0 +1,22 @@
+# Node & Server
+node_modules/
+server/node_modules/
+server/sessions/
+server/.env
+*.log
+
+# Flutter & Dart
+.dart_tool/
+.packages
+build/
+client/.dart_tool/
+client/build/
+client/.flutter-plugins
+client/.flutter-plugins-dependencies
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
